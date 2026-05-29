@@ -1,4 +1,4 @@
-<img width="1342" height="7514" alt="1a1a4466132cc33e9a87f6a5d2c16ebf" src="https://github.com/user-attachments/assets/46a12a97-99d0-4121-96f4-ab044bcb129b" /># 【Skill 创作】我做了一个能规划完整旅游方案的 Skill
+【Skill 创作】我做了一个能规划完整旅游方案的 Skill
 
 ## 1、Skill简介
 
