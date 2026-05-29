@@ -1,510 +1,585 @@
 """
-旅游方案一键生成工具，没任何卵用的脚本
-整合功能：天气查询 + 交通价格查询 + 方案导出为Word文档
+智能旅游规划助手 - 真正有用的版本
+功能：收集用户输入 → 拼接Skill模板 → 调用大模型 → 解析JSON → 格式化输出
 """
 
-import requests
 import json
 import os
-from datetime import datetime, timedelta
-from docx import Document
-from docx.shared import Inches, Pt, Cm, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.ns import qn
+import re
+from datetime import datetime
+from typing import Dict, List, Optional
+import requests
 
 
-
-# 天气查询（调用免费天气API）
-
-
-class WeatherService:
-    """天气查询服务，使用和风天气免费API"""
-
-    # 和风天气免费API（需要注册获取key，或使用备用方案）
-    BASE_URL = "https://devapi.qweather.com/v7"
-
+class TravelSkillTemplate:
+    """旅游规划Skill模板"""
+    
     @staticmethod
-    def get_weather(city_name: str, date_str: str = None) -> dict:
+    def build_prompt(
+        from_city: str,
+        destinations: List[str],
+        days: int,
+        budget: Optional[float] = None,
+        people: int = 1,
+        preferences: Optional[str] = None,
+        start_date: Optional[str] = None,
+    ) -> str:
         """
-        查询城市天气
-        :param city_name: 城市名称，如"北京"
-        :param date_str: 日期，如"2025-06-01"，不填则查询今天
-        :return: 天气信息字典
+        构建标准化的Skill提示词
+        
+        这个模板定义了"规范"，让大模型知道必须输出什么
         """
-        # 方案1：使用和风天气API（需要API key）
-        # 方案2：使用wttr.in（免费，无需key）
-        try:
-            url = f"https://wttr.in/{city_name}?format=j1&lang=zh"
-            response = requests.get(url, timeout=10)
-            data = response.json()
-
-            current = data.get("current_condition", [{}])[0]
-            weather = data.get("weather", [{}])[0]
-
-            result = {
-                "city": city_name,
-                "temp_max": int(weather.get("maxtempC", 25)),
-                "temp_min": int(weather.get("mintempC", 15)),
-                "current_temp": int(current.get("temp_C", 20)),
-                "desc": current.get("lang_zh", [{}])[0].get("value", "多云"),
-                "humidity": current.get("humidity", "60"),
-                "wind": current.get("windspeedKmph", "10"),
-            }
-            return result
-        except Exception as e:
-            print(f"天气查询失败: {e}")
-            return {
-                "city": city_name,
-                "temp_max": 30,
-                "temp_min": 18,
-                "current_temp": 24,
-                "desc": "查询失败，请手动确认",
-                "humidity": "60",
-                "wind": "10",
-            }
-
-    @staticmethod
-    def get_clothing_advice(weather: dict) -> str:
-        """根据天气生成穿衣建议"""
-        temp_max = weather["temp_max"]
-        temp_min = weather["temp_min"]
-
-        advice = []
-
-        if temp_max >= 35:
-            advice.append("高温天气，注意防暑降温")
-            advice.append("上衣：短袖、背心等清凉透气衣物")
-            advice.append("下装：短裤、薄裙")
-            advice.append("必备：防晒霜、遮阳帽、太阳镜、便携水杯")
-        elif temp_max >= 28:
-            advice.append("天气炎热")
-            advice.append("上衣：短袖T恤、薄衬衫")
-            advice.append("下装：短裤、薄款长裤")
-            advice.append("必备：防晒霜、太阳镜、雨伞")
-        elif temp_max >= 22:
-            advice.append("天气舒适")
-            advice.append("上衣：短袖+薄外套（早晚温差大）")
-            advice.append("下装：长裤、牛仔裤")
-            advice.append("必备：薄外套、雨伞")
-        elif temp_max >= 15:
-            advice.append("天气偏凉")
-            advice.append("上衣：长袖T恤+卫衣/薄毛衣")
-            advice.append("下装：长裤")
-            advice.append("必备：厚外套、雨伞")
+        
+        # 构建目的地描述
+        if len(destinations) == 1:
+            dest_desc = destinations[0]
+            route_type = "单目的地"
         else:
-            advice.append("天气较冷")
-            advice.append("上衣：保暖内衣+毛衣+厚外套/羽绒服")
-            advice.append("下装：厚裤、加绒裤")
-            advice.append("必备：围巾、手套、帽子")
+            dest_desc = " → ".join(destinations)
+            route_type = "多目的地中转"
+        
+        # 构建预算描述
+        budget_desc = f"预算约¥{budget}" if budget else "预算未指定"
+        
+        # 构建日期描述
+        date_desc = f"出发日期：{start_date}" if start_date else "日期未指定（假设近期）"
+        
+        # 构建偏好描述
+        pref_desc = f"特定需求：{preferences}" if preferences else "无特定需求"
+        
+        prompt = f"""你是一个专业的旅游规划助手。请为以下行程生成完整的旅游方案。
 
-        if temp_max - temp_min >= 10:
-            advice.append(f"注意：昼夜温差达{temp_max - temp_min}°C，建议洋葱式穿衣")
+## 行程需求
+- 出发地：{from_city}
+- 目的地：{dest_desc}
+- 行程类型：{route_type}
+- 出行天数：{days}天
+- 出行人数：{people}人
+- {budget_desc}
+- {date_desc}
+- {pref_desc}
 
-        return "\n".join(advice)
+## 你必须提供以下信息（JSON格式）
+
+```json
+{{
+  "title": "行程标题",
+  "overview": {{
+    "出发地": "",
+    "目的地": "",
+    "行程路线": "",
+    "总天数": "",
+    "出行人数": "",
+    "预算": "",
+    "特定需求": ""
+  }},
+  "weather": [
+    {{
+      "city": "城市名",
+      "date": "日期",
+      "temp_min": 最低温度,
+      "temp_max": 最高温度,
+      "condition": "天气状况",
+      "clothing_advice": "穿衣建议"
+    }}
+  ],
+  "transport": [
+    {{
+      "segment": "第几段",
+      "from": "出发城市",
+      "to": "到达城市",
+      "options": [
+        {{
+          "type": "高铁/飞机/大巴",
+          "name": "车次/航班号",
+          "depart": "出发时间",
+          "arrive": "到达时间",
+          "duration": "时长",
+          "price": 价格,
+          "recommendation": "推荐理由"
+        }}
+      ]
+    }}
+  ],
+  "hotels": [
+    {{
+      "city": "城市",
+      "recommendations": [
+        {{
+          "name": "酒店名称",
+          "location": "位置",
+          "price_per_night": 每晚价格,
+          "rating": 评分,
+          "reason": "推荐理由"
+        }}
+      ]
+    }}
+  ],
+  "itinerary": [
+    {{
+      "day": 第几天,
+      "date": "日期",
+      "city": "所在城市",
+      "activities": [
+        {{
+          "time": "上午/下午/晚上",
+          "name": "活动/景点名称",
+          "type": "景点/美食/交通",
+          "score": 评分1-10,
+          "price": 价格,
+          "duration": "建议时长",
+          "tips": "注意事项"
+        }}
+      ]
+    }}
+  ],
+  "food": [
+    {{
+      "city": "城市",
+      "recommendations": [
+        {{
+          "name": "美食名称",
+          "shop": "推荐店铺",
+          "price": 人均价格,
+          "reason": "推荐理由"
+        }}
+      ]
+    }}
+  ],
+  "budget_detail": {{
+    "交通": 0,
+    "住宿": 0,
+    "门票": 0,
+    "餐饮": 0,
+    "其他": 0,
+    "total": 0
+  }},
+  "tips": [
+    "提示1",
+    "提示2"
+  ],
+  "sources": [
+    "信息来源1",
+    "信息来源2"
+  ]
+}}
+```
+
+## 要求
+
+1. **天气必须准确**：根据季节和目的地给出合理温度范围
+2. **交通必须实用**：提供真实存在的车次/航班，价格符合市场行情
+3. **酒店必须具体**：给出真实存在的酒店名称，不要编造
+4. **行程必须合理**：每天2-3个主要景点，考虑交通时间
+5. **预算必须详细**：各项费用明确，总计符合用户预算
+6. **中途游玩必须支持**：如果是多目的地，每个城市都要有独立行程
+
+## 输出格式
+
+请直接输出JSON，不要有任何其他文字。确保JSON格式正确，可以被解析。
+"""
+        return prompt
 
 
-
-# 交通价格查询（调用公开API）
-
-
-class TransportService:
-    """交通价格查询服务"""
-
-    @staticmethod
-    def search_train(from_city: str, to_city: str, date_str: str = None) -> list:
+class LLMClient:
+    """大模型调用客户端"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # 支持多种模型接口
+        self.base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        self.model = os.getenv("LLM_MODEL", "gpt-4")
+    
+    def call(self, prompt: str, temperature: float = 0.7) -> str:
         """
-        查询火车/高铁信息
-        注意：12306官方API不对外开放，此处使用模拟数据或第三方接口
-        建议实际使用时接入携程/去哪儿API
+        调用大模型
+        
+        支持：OpenAI、Azure、Claude、文心一言、通义千问等
+        通过环境变量配置
         """
-        # 常见城市间高铁参考数据（实际项目应接入API）
-        train_data = {
-            ("天津", "北京"): [
-                {"type": "高铁", "train_no": "C2025", "depart": "06:00", "arrive": "06:30",
-                 "duration": "30分钟", "price": 54.5},
-                {"type": "高铁", "train_no": "C2027", "depart": "07:00", "arrive": "07:34",
-                 "duration": "34分钟", "price": 54.5},
-                {"type": "高铁", "train_no": "G350", "depart": "08:00", "arrive": "08:30",
-                 "duration": "30分钟", "price": 65.5},
-            ],
-            ("北京", "大连"): [
-                {"type": "高铁", "train_no": "G3502", "depart": "07:00", "arrive": "12:00",
-                 "duration": "5小时", "price": 400},
-                {"type": "高铁", "train_no": "G390", "depart": "09:00", "arrive": "14:00",
-                 "duration": "5小时", "price": 400},
-            ],
-            ("成都", "西安"): [
-                {"type": "高铁", "train_no": "G350", "depart": "07:00", "arrive": "10:12",
-                 "duration": "3小时12分", "price": 263},
-                {"type": "高铁", "train_no": "G2204", "depart": "08:08", "arrive": "12:06",
-                 "duration": "3小时58分", "price": 263},
-            ],
-        }
-
-        key = (from_city, to_city)
-        results = train_data.get(key, [])
-
-        if not results:
-            # 尝试反向查询
-            key = (to_city, from_city)
-            results = train_data.get(key, [])
-
-        if not results:
-            print(f"暂无 {from_city}→{to_city} 的火车数据，请手动查询12306")
-            results = [{"type": "高铁", "train_no": "待查询", "depart": "--",
-                        "arrive": "--", "duration": "待确认", "price": 0}]
-
-        return results
-
-    @staticmethod
-    def search_flight(from_city: str, to_city: str, date_str: str = None) -> list:
-        """
-        查询机票信息
-        注意：实际项目应接入携程/去哪儿/飞猪API
-        """
-        # 参考数据
-        flight_data = {
-            ("成都", "北京"): [
-                {"airline": "国航", "flight_no": "CA4196", "depart": "07:00", "arrive": "09:35",
-                 "duration": "2小时35分", "price": 500},
-                {"airline": "川航", "flight_no": "3U8883", "depart": "08:30", "arrive": "11:00",
-                 "duration": "2小时30分", "price": 420},
-            ],
-            ("北京", "大连"): [
-                {"airline": "国航", "flight_no": "CA1607", "depart": "08:00", "arrive": "09:30",
-                 "duration": "1小时30分", "price": 350},
-                {"airline": "南航", "flight_no": "CZ6497", "depart": "14:00", "arrive": "15:30",
-                 "duration": "1小时30分", "price": 300},
-            ],
-        }
-
-        key = (from_city, to_city)
-        results = flight_data.get(key, [])
-
-        if not results:
-            results = [{"airline": "待查询", "flight_no": "--", "depart": "--",
-                        "arrive": "--", "duration": "待确认", "price": 0}]
-
-        return results
-
-
-
-# 方案导出为Word文档
-
-class DocExporter:
-    """将旅游方案导出为Word文档"""
-
-    @staticmethod
-    def create_travel_plan(plan_data: dict, output_path: str):
-        """
-        生成旅游方案Word文档
-        :param plan_data: 方案数据字典
-        :param output_path: 输出文件路径
-        """
-        doc = Document()
-
-        # 设置默认字体
-        style = doc.styles["Normal"]
-        style.font.name = "微软雅黑"
-        style.font.size = Pt(11)
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
-
-        # ---- 标题 ----
-        title = doc.add_heading(plan_data["title"], level=0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-        # ---- 行程概览 ----
-        doc.add_heading("行程概览", level=1)
-        overview = plan_data.get("overview", {})
-        for key, value in overview.items():
-            p = doc.add_paragraph()
-            p.add_run(f"{key}：").bold = True
-            p.add_run(str(value))
-
-        # ---- 天气与穿衣建议 ----
-        if "weather" in plan_data:
-            doc.add_heading("天气与穿衣建议", level=1)
-            weather = plan_data["weather"]
-            for city_name, weather_info in weather.items():
-                doc.add_heading(city_name, level=2)
-                doc.add_paragraph(
-                    f"温度：{weather_info['temp_min']}°C - {weather_info['temp_max']}°C"
-                )
-                doc.add_paragraph(f"天气：{weather_info['desc']}")
-                doc.add_paragraph(f"穿衣建议：\n{weather_info.get('clothing_advice', '')}")
-
-        # ---- 交通方案 ----
-        if "transport" in plan_data:
-            doc.add_heading("交通方案", level=1)
-            for segment_name, segment_info in plan_data["transport"].items():
-                doc.add_heading(segment_name, level=2)
-                if isinstance(segment_info, list) and len(segment_info) > 0:
-                    if isinstance(segment_info[0], dict):
-                        table = doc.add_table(
-                            rows=1,
-                            cols=len(segment_info[0]),
-                            style="Table Grid"
-                        )
-                        table.alignment = WD_TABLE_ALIGNMENT.CENTER
-                        # 表头
-                        hdr_cells = table.rows[0].cells
-                        for i, key in enumerate(segment_info[0].keys()):
-                            hdr_cells[i].text = str(key)
-                        # 数据行
-                        for item in segment_info:
-                            row_cells = table.add_row().cells
-                            for i, key in enumerate(item.keys()):
-                                row_cells[i].text = str(item[key])
-
-        # ---- 酒店推荐 ----
-        if "hotels" in plan_data:
-            doc.add_heading("酒店推荐", level=1)
-            for city_name, hotel_list in plan_data["hotels"].items():
-                doc.add_heading(city_name, level=2)
-                if isinstance(hotel_list, list) and len(hotel_list) > 0:
-                    table = doc.add_table(
-                        rows=1,
-                        cols=len(hotel_list[0]),
-                        style="Table Grid"
-                    )
-                    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-                    hdr_cells = table.rows[0].cells
-                    for i, key in enumerate(hotel_list[0].keys()):
-                        hdr_cells[i].text = str(key)
-                    for hotel in hotel_list:
-                        row_cells = table.add_row().cells
-                        for i, key in enumerate(hotel.keys()):
-                            row_cells[i].text = str(hotel[key])
-
-        # ---- 行程安排 ----
-        if "itinerary" in plan_data:
-            doc.add_heading("行程安排", level=1)
-            for day_info in plan_data["itinerary"]:
-                doc.add_heading(day_info.get("day", ""), level=2)
-                for activity in day_info.get("activities", []):
-                    p = doc.add_paragraph()
-                    p.add_run(f"{activity.get('time', '')} ").bold = True
-                    p.add_run(activity.get("name", ""))
-                    if activity.get("score"):
-                        p.add_run(f"（{activity['score']}分")
-                    if activity.get("price"):
-                        p.add_run(f"，{activity['price']}")
-                    if activity.get("score") or activity.get("price"):
-                        p.add_run("）")
-
-        # ---- 费用预算 ----
-        if "budget" in plan_data:
-            doc.add_heading("费用预算", level=1)
-            budget = plan_data["budget"]
-            if isinstance(budget, list) and len(budget) > 0:
-                table = doc.add_table(rows=1, cols=len(budget[0]), style="Table Grid")
-                table.alignment = WD_TABLE_ALIGNMENT.CENTER
-                hdr_cells = table.rows[0].cells
-                for i, key in enumerate(budget[0].keys()):
-                    hdr_cells[i].text = str(key)
-                for row in budget:
-                    row_cells = table.add_row().cells
-                    for i, key in enumerate(row.keys()):
-                        row_cells[i].text = str(row[key])
-
-        # ---- 温馨提示 ----
-        if "tips" in plan_data:
-            doc.add_heading("温馨提示", level=1)
-            for tip in plan_data["tips"]:
-                doc.add_paragraph(tip, style="List Bullet")
-
-        # ---- 信息来源 ----
-        if "sources" in plan_data:
-            doc.add_heading("信息来源", level=1)
-            doc.add_paragraph(f"数据查询时间：{plan_data['sources'].get('query_time', '')}")
-            for source in plan_data["sources"].get("list", []):
-                doc.add_paragraph(
-                    f"{source.get('name', '')} - {source.get('content', '')} "
-                    f"({source.get('timeliness', '')})",
-                    style="List Bullet"
-                )
-            doc.add_paragraph(
-                "免责声明：本攻略信息来源于公开网络渠道，仅供参考。"
-                "价格信息波动较大，请以实际预订时为准。",
-                style="List Bullet"
-            )
-
-        # 保存
-        doc.save(output_path)
-        print(f"方案已导出至：{output_path}")
-
-
-
-# 一键生成主流程
-
-
-def generate_travel_plan(
-    from_city: str,
-    destinations: list,
-    days: int,
-    budget: float = None,
-    specific_needs: str = None,
-    output_dir: str = None,
-):
-    """
-    一键生成旅游方案
-
-    :param from_city: 出发城市，如"天津"
-    :param destinations: 目的地列表，如["北京", "大连"]
-    :param days: 出行天数
-    :param budget: 预算（元）
-    :param specific_needs: 特定需求，如"环球影城、看海"
-    :param output_dir: 输出目录
-    :return: 方案数据字典
-    """
-
-    if output_dir is None:
-        output_dir = os.path.join(os.path.expanduser("~"), "Desktop", "旅游方案")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. 查询天气
-    print("正在查询天气...")
-    weather_service = WeatherService()
-    weather_data = {}
-    for city in [from_city] + destinations:
-        weather = weather_service.get_weather(city)
-        weather["clothing_advice"] = weather_service.get_clothing_advice(weather)
-        weather_data[city] = weather
-        print(f"  {city}：{weather['temp_min']}°C-{weather['temp_max']}°C，{weather['desc']}")
-
-    # 2. 查询交通
-    print("正在查询交通方案...")
-    transport_service = TransportService()
-    transport_data = {}
-
-    # 出发到第一个目的地
-    if len(destinations) >= 1:
-        trains = transport_service.search_train(from_city, destinations[0])
-        flights = transport_service.search_flight(from_city, destinations[0])
-        transport_data[f"{from_city} → {destinations[0]}"] = {
-            "train": trains,
-            "flight": flights,
-        }
-        print(f"  {from_city}→{destinations[0]}：高铁{len(trains)}条，飞机{len(flights)}条")
-
-    # 目的地之间的交通
-    for i in range(len(destinations) - 1):
-        trains = transport_service.search_train(destinations[i], destinations[i + 1])
-        flights = transport_service.search_flight(destinations[i], destinations[i + 1])
-        transport_data[f"{destinations[i]} → {destinations[i + 1]}"] = {
-            "train": trains,
-            "flight": flights,
-        }
-        print(f"  {destinations[i]}→{destinations[i + 1]}：高铁{len(trains)}条，飞机{len(flights)}条")
-
-    # 返回交通
-    trains_back = transport_service.search_train(destinations[-1], from_city)
-    flights_back = transport_service.search_flight(destinations[-1], from_city)
-    transport_data[f"{destinations[-1]} → {from_city}（返程）"] = {
-        "train": trains_back,
-        "flight": flights_back,
-    }
-
-    # 3. 组装方案数据
-    dest_str = "→".join(destinations)
-    plan_data = {
-        "title": f"{from_city}→{dest_str} {days}日游规划方案",
-        "overview": {
-            "出发地": from_city,
-            "行程路线": f"{from_city} → {' → '.join(destinations)} → 返回{from_city}",
-            "总天数": f"{days}天{days - 1}晚",
-            "特定需求": specific_needs or "无",
-            "预算": f"¥{budget}" if budget else "未指定",
-        },
-        "weather": weather_data,
-        "transport": transport_data,
-        "hotels": {
-            city: [
-                {"酒店名称": "请手动查询携程/美团填写",
-                 "位置": "待确认",
-                 "参考价格/晚": "待查询*",
-                 "评分": "待查询",
-                 "推荐理由": "建议选择交通便利、靠近景点的酒店",
-                 "预订渠道": "携程/美团/飞猪"}
-            ]
-            for city in destinations
-        },
-        "itinerary": [
-            {
-                "day": f"第{i + 1}天",
-                "activities": [
-                    {"time": "上午", "name": "请根据实际需求填写景点",
-                     "score": "", "price": ""},
-                    {"time": "下午", "name": "请根据实际需求填写景点",
-                     "score": "", "price": ""},
-                    {"time": "晚上", "name": "自由活动/美食探索",
-                     "score": "", "price": ""},
-                ]
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
             }
-            for i in range(days)
-        ],
-        "budget": [
-            {"项目": "交通", "预估费用": "待计算*"},
-            {"项目": "住宿", "预估费用": "待计算*"},
-            {"项目": "门票", "预估费用": "待计算*"},
-            {"项目": "餐饮", "预估费用": "待计算*"},
-            {"项目": "总计", "预估费用": "待计算*"},
-        ],
-        "tips": [
-            "以上价格为参考价，请以实际查询为准",
-            "建议提前预订交通和住宿",
-            "出行前请再次核实景点开放时间",
-        ],
-        "sources": {
-            "query_time": datetime.now().strftime("%Y年%m月%d日"),
-            "list": [
-                {"name": "wttr.in", "content": "天气预报", "timeliness": "实时"},
-                {"name": "12306/携程", "content": "交通时刻表及价格", "timeliness": "实时*"},
-            ]
-        },
-    }
-
-    # 4. 导出Word文档
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"旅游方案_{from_city}→{dest_str}_{timestamp}.docx"
-    output_path = os.path.join(output_dir, filename)
-
-    DocExporter.create_travel_plan(plan_data, output_path)
-
-    print(f"\n方案生成完成！")
-    print(f"文件路径：{output_path}")
-
-    return plan_data
+            
+            data = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "你是一个专业的旅游规划助手。"},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": temperature,
+                "max_tokens": 4000
+            }
+            
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=120
+            )
+            
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+            
+        except Exception as e:
+            print(f"调用大模型失败: {e}")
+            print("请检查：")
+            print("1. 是否设置了 OPENAI_API_KEY 环境变量")
+            print("2. 是否正确配置了 LLM_BASE_URL 和 LLM_MODEL")
+            raise
 
 
-# 使用示例
+class TravelPlanParser:
+    """旅游计划解析器"""
+    
+    @staticmethod
+    def parse_json(text: str) -> Dict:
+        """从模型返回的文本中提取JSON"""
+        # 尝试直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        
+        # 尝试从代码块中提取
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # 尝试从文本中提取最像JSON的部分
+        json_match = re.search(r'(\{.*\})', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        raise ValueError("无法从模型返回中提取有效的JSON")
 
-if __name__ == "__main__":
-    # 示例1：天津→北京→大连 3天
-    generate_travel_plan(
-        from_city="天津",
-        destinations=["北京", "大连"],
-        days=3,
-        budget=6000,
-        specific_needs="北京环球影城、大连看海",
+
+class TravelPlanFormatter:
+    """旅游计划格式化器"""
+    
+    @staticmethod
+    def format_console(plan: Dict) -> str:
+        """格式化为控制台输出"""
+        lines = []
+        
+        # 标题
+        lines.append("=" * 70)
+        lines.append(f"  {plan.get('title', '旅游规划方案')}")
+        lines.append("=" * 70)
+        
+        # 行程概览
+        lines.append("\n【行程概览】")
+        overview = plan.get("overview", {})
+        for key, value in overview.items():
+            lines.append(f"  {key}：{value}")
+        
+        # 天气
+        if plan.get("weather"):
+            lines.append("\n【天气与穿衣建议】")
+            for w in plan["weather"]:
+                lines.append(f"\n  {w.get('city', '')} - {w.get('date', '')}")
+                lines.append(f"    温度：{w.get('temp_min')}°C ~ {w.get('temp_max')}°C")
+                lines.append(f"    天气：{w.get('condition', '')}")
+                lines.append(f"    穿衣：{w.get('clothing_advice', '')}")
+        
+        # 交通
+        if plan.get("transport"):
+            lines.append("\n【交通方案】")
+            for t in plan["transport"]:
+                lines.append(f"\n  {t.get('segment', '')}：{t.get('from', '')} → {t.get('to', '')}")
+                for opt in t.get("options", []):
+                    lines.append(f"    {opt.get('type', '')} {opt.get('name', '')}")
+                    lines.append(f"      时间：{opt.get('depart', '')} - {opt.get('arrive', '')}")
+                    lines.append(f"      时长：{opt.get('duration', '')}")
+                    lines.append(f"      价格：¥{opt.get('price', 0)}")
+                    lines.append(f"      推荐：{opt.get('recommendation', '')}")
+        
+        # 酒店
+        if plan.get("hotels"):
+            lines.append("\n【酒店推荐】")
+            for h in plan["hotels"]:
+                lines.append(f"\n  {h.get('city', '')}")
+                for r in h.get("recommendations", []):
+                    lines.append(f"    {r.get('name', '')}")
+                    lines.append(f"      位置：{r.get('location', '')}")
+                    lines.append(f"      价格：¥{r.get('price_per_night', 0)}/晚")
+                    lines.append(f"      评分：{r.get('rating', 0)}分")
+                    lines.append(f"      理由：{r.get('reason', '')}")
+        
+        # 行程
+        if plan.get("itinerary"):
+            lines.append("\n【详细行程】")
+            for day in plan["itinerary"]:
+                lines.append(f"\n  第{day.get('day', '')}天 - {day.get('date', '')} - {day.get('city', '')}")
+                for act in day.get("activities", []):
+                    lines.append(f"    {act.get('time', '')}：{act.get('name', '')}")
+                    if act.get("score"):
+                        lines.append(f"      评分：{act['score']}分")
+                    if act.get("price"):
+                        lines.append(f"      价格：¥{act['price']}")
+                    if act.get("duration"):
+                        lines.append(f"      时长：{act['duration']}")
+                    if act.get("tips"):
+                        lines.append(f"      提示：{act['tips']}")
+        
+        # 美食
+        if plan.get("food"):
+            lines.append("\n【美食推荐】")
+            for f in plan["food"]:
+                lines.append(f"\n  {f.get('city', '')}")
+                for r in f.get("recommendations", []):
+                    lines.append(f"    {r.get('name', '')} - {r.get('shop', '')}")
+                    lines.append(f"      人均：¥{r.get('price', 0)}")
+                    lines.append(f"      理由：{r.get('reason', '')}")
+        
+        # 预算
+        if plan.get("budget_detail"):
+            lines.append("\n【费用预算】")
+            budget = plan["budget_detail"]
+            for key, value in budget.items():
+                if key != "total":
+                    lines.append(f"  {key}：¥{value}")
+            lines.append(f"  总计：¥{budget.get('total', 0)}")
+        
+        # 提示
+        if plan.get("tips"):
+            lines.append("\n【温馨提示】")
+            for tip in plan["tips"]:
+                lines.append(f"  • {tip}")
+        
+        # 信息来源
+        if plan.get("sources"):
+            lines.append("\n【信息来源】")
+            for source in plan["sources"]:
+                lines.append(f"  • {source}")
+        
+        lines.append("\n" + "=" * 70)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save_to_file(plan: Dict, output_dir: str = None) -> str:
+        """保存为文件"""
+        if output_dir is None:
+            output_dir = os.path.join(os.path.expanduser("~"), "Desktop", "旅游方案")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 生成文件名
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        from_city = plan.get("overview", {}).get("出发地", "未知")
+        dest = plan.get("overview", {}).get("目的地", "未知").replace(" → ", "_")
+        filename = f"旅游方案_{from_city}_{dest}_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        # 保存JSON
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(plan, f, ensure_ascii=False, indent=2)
+        
+        # 同时保存文本版本
+        txt_filename = filename.replace(".json", ".txt")
+        txt_filepath = os.path.join(output_dir, txt_filename)
+        with open(txt_filepath, "w", encoding="utf-8") as f:
+            f.write(TravelPlanFormatter.format_console(plan))
+        
+        return filepath, txt_filepath
+
+
+class TravelAgent:
+    """旅游规划智能体 - 主入口"""
+    
+    def __init__(self):
+        self.template = TravelSkillTemplate()
+        self.llm = LLMClient()
+        self.parser = TravelPlanParser()
+        self.formatter = TravelPlanFormatter()
+    
+    def plan(
+        self,
+        from_city: str,
+        destinations: List[str],
+        days: int,
+        budget: Optional[float] = None,
+        people: int = 1,
+        preferences: Optional[str] = None,
+        start_date: Optional[str] = None,
+        save: bool = True,
+    ) -> Dict:
+        """
+        生成旅游方案
+        
+        完整流程：
+        1. 收集用户输入
+        2. 拼接Skill模板
+        3. 调用大模型
+        4. 解析JSON
+        5. 格式化输出
+        6. 保存文件
+        """
+        
+        print("=" * 70)
+        print("智能旅游规划助手")
+        print("=" * 70)
+        
+        # 1. 构建提示词
+        print("\n[1/4] 正在构建规划模板...")
+        prompt = self.template.build_prompt(
+            from_city=from_city,
+            destinations=destinations,
+            days=days,
+            budget=budget,
+            people=people,
+            preferences=preferences,
+            start_date=start_date,
+        )
+        
+        # 2. 调用大模型
+        print("[2/4] 正在调用AI生成方案（约需30-60秒）...")
+        try:
+            response = self.llm.call(prompt)
+        except Exception as e:
+            print(f"\n错误：{e}")
+            return None
+        
+        # 3. 解析结果
+        print("[3/4] 正在解析方案...")
+        try:
+            plan = self.parser.parse_json(response)
+        except ValueError as e:
+            print(f"\n解析失败：{e}")
+            print("\n模型原始返回：")
+            print(response[:500] + "..." if len(response) > 500 else response)
+            return None
+        
+        # 4. 格式化输出
+        print("[4/4] 正在格式化输出...")
+        formatted = self.formatter.format_console(plan)
+        print(formatted)
+        
+        # 5. 保存文件
+        if save:
+            json_path, txt_path = self.formatter.save_to_file(plan)
+            print(f"\n方案已保存：")
+            print(f"  JSON：{json_path}")
+            print(f"  文本：{txt_path}")
+        
+        return plan
+
+
+def interactive_mode():
+    """交互模式"""
+    print("\n" + "=" * 70)
+    print("欢迎使用智能旅游规划助手！")
+    print("=" * 70)
+    
+    # 收集用户输入
+    print("\n请回答以下问题（直接回车使用默认值）：\n")
+    
+    from_city = input("1. 出发城市？ ").strip()
+    if not from_city:
+        print("出发城市不能为空！")
+        return
+    
+    dest_input = input("2. 目的地（多个用逗号分隔，如：北京,大连）？ ").strip()
+    destinations = [d.strip() for d in dest_input.split(",") if d.strip()]
+    if not destinations:
+        print("目的地不能为空！")
+        return
+    
+    days_str = input("3. 出行天数？ ").strip()
+    try:
+        days = int(days_str) if days_str else 3
+    except ValueError:
+        days = 3
+    
+    budget_str = input("4. 预算（元，可选）？ ").strip()
+    budget = float(budget_str) if budget_str else None
+    
+    people_str = input("5. 出行人数（默认1人）？ ").strip()
+    try:
+        people = int(people_str) if people_str else 1
+    except ValueError:
+        people = 1
+    
+    preferences = input("6. 特定需求（如：环球影城、看海、美食等，可选）？ ").strip() or None
+    
+    start_date = input("7. 出发日期（如：2025-06-01，可选）？ ").strip() or None
+    
+    # 确认
+    print("\n" + "-" * 70)
+    print("请确认行程信息：")
+    print(f"  出发地：{from_city}")
+    print(f"  目的地：{' → '.join(destinations)}")
+    print(f"  天数：{days}天")
+    print(f"  人数：{people}人")
+    print(f"  预算：¥{budget}" if budget else "  预算：未指定")
+    print(f"  需求：{preferences}" if preferences else "  需求：无")
+    print(f"  日期：{start_date}" if start_date else "  日期：近期")
+    print("-" * 70)
+    
+    confirm = input("\n确认生成方案？(y/n) ").strip().lower()
+    if confirm != "y":
+        print("已取消")
+        return
+    
+    # 生成方案
+    agent = TravelAgent()
+    agent.plan(
+        from_city=from_city,
+        destinations=destinations,
+        days=days,
+        budget=budget,
+        people=people,
+        preferences=preferences,
+        start_date=start_date,
     )
 
-    # 示例2：成都→西安 3天
-    # generate_travel_plan(
-    #     from_city="成都",
-    #     destinations=["西安"],
-    #     days=3,
-    #     budget=3000,
-    #     specific_needs="兵马俑、回民街美食",
-    # )
 
-    # 示例3：重庆→北京→天津 5天
-    # generate_travel_plan(
-    #     from_city="重庆",
-    #     destinations=["北京", "天津"],
-    #     days=5,
-    #     budget=5000,
-    #     specific_needs="环球影城、煎饼果子",
-    # )
+def quick_mode(
+    from_city: str,
+    destinations: str,
+    days: int,
+    budget: Optional[float] = None,
+    people: int = 1,
+    preferences: Optional[str] = None,
+):
+    """快速模式 - 命令行参数"""
+    dest_list = [d.strip() for d in destinations.split(",")]
+    
+    agent = TravelAgent()
+    agent.plan(
+        from_city=from_city,
+        destinations=dest_list,
+        days=days,
+        budget=budget,
+        people=people,
+        preferences=preferences,
+    )
+
+
+if __name__ == "__main__":
+    import sys
+    
+    # 检查是否有命令行参数
+    if len(sys.argv) > 1:
+        # 快速模式
+        # 用法：python travel_agent.py 天津 北京,大连 3 6000 1 环球影城
+        from_city = sys.argv[1]
+        destinations = sys.argv[2]
+        days = int(sys.argv[3])
+        budget = float(sys.argv[4]) if len(sys.argv) > 4 else None
+        people = int(sys.argv[5]) if len(sys.argv) > 5 else 1
+        preferences = sys.argv[6] if len(sys.argv) > 6 else None
+        
+        quick_mode(from_city, destinations, days, budget, people, preferences)
+    else:
+        # 交互模式
+        interactive_mode()
